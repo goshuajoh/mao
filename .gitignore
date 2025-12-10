@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Data files (DO NOT COMMIT THESE)
+*.xlsx
+*.xls
+*.csv
+signify_order_list*.xlsx
+Signify_Master_Reference*.xlsx
+export_*.xlsx
+factory_output_*.xlsx
+orderhub_output_*.xlsx
+
+# OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Testing
+test_*.py
+*_test.py

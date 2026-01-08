@@ -1,8 +1,13 @@
 """
-Signify Order Processor - Web App v2.0
+Signify Order Processor - Web App v2.1
 =======================================
 Streamlit web interface for non-technical users
 Deploy to Streamlit Cloud for free!
+
+Changes in v2.1:
+- Added PW# lookup (Column K) from order history
+- Added "Download All" ZIP button for all 3 files
+- 格式转换 file now includes both PW# and 格式转换
 
 Changes in v2.0:
 - POAF column formatted as whole number (no scientific notation)
@@ -17,6 +22,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import io
+import zipfile
 
 def check_password():
     """Returns True if user enters correct password"""
@@ -486,51 +492,71 @@ if export_file and history_file and master_file:
                 'Required Delivery Date(yyyy-MM-dd)': pd.to_datetime(df_new['Deliv. Date']).dt.strftime('%Y-%m-%d')
             })
             
-            # Step 12: Generate 格式转换 export file (NEW)
+            # Step 12: Generate 格式转换 export file with PW# (NEW)
             status_text.text("Step 12/12: Generating 格式转换 file...")
             progress_bar.progress(94)
             
-            # Create lookup dictionary for 格式转换 from history
-            # Column 19 is 合并 (UUID), Column 21 is 格式转换
+            # Create lookup dictionaries from history
+            # Column 19 is 合并 (UUID), Column 20 is PW#, Column 21 is 格式转换
             uuid_col_name = df_history.columns[19]  # 合并
+            pw_col_name = df_history.columns[20]    # PW#
             format_col_name = df_history.columns[21]  # 格式转换
             
-            # Build lookup dict: UUID -> 格式转换 (as date only, no timestamp)
+            # Build lookup dicts: UUID -> 格式转换 and UUID -> PW#
             format_lookup = {}
+            pw_lookup = {}
             for idx, row in df_history.iterrows():
                 uuid_val = str(row[uuid_col_name]) if pd.notna(row[uuid_col_name]) else None
-                format_val = row[format_col_name] if pd.notna(row[format_col_name]) else None
-                if uuid_val and format_val:
-                    # Convert to date only (no timestamp)
-                    if hasattr(format_val, 'date'):
-                        format_lookup[uuid_val] = format_val.date()
-                    elif hasattr(format_val, 'strftime'):
-                        format_lookup[uuid_val] = pd.to_datetime(format_val).date()
-                    else:
-                        format_lookup[uuid_val] = format_val
+                if uuid_val:
+                    # 格式转换 (as date only, no timestamp)
+                    format_val = row[format_col_name] if pd.notna(row[format_col_name]) else None
+                    if format_val:
+                        if hasattr(format_val, 'date'):
+                            format_lookup[uuid_val] = format_val.date()
+                        elif hasattr(format_val, 'strftime'):
+                            format_lookup[uuid_val] = pd.to_datetime(format_val).date()
+                        else:
+                            format_lookup[uuid_val] = format_val
+                    
+                    # PW#
+                    pw_val = row[pw_col_name] if pd.notna(row[pw_col_name]) else None
+                    if pw_val:
+                        pw_lookup[uuid_val] = pw_val
             
             # Create enhanced export (copy of original)
             df_export_enhanced = df_export.copy()
             
-            # Lookup 格式转换 for each row using UUID
+            # Lookup 格式转换 and PW# for each row using UUID
             def get_format_conversion(uuid):
                 return format_lookup.get(str(uuid), '')
             
-            df_export_enhanced['格式转换'] = df_export_enhanced['UUID'].apply(get_format_conversion)
+            def get_pw_number(uuid):
+                return pw_lookup.get(str(uuid), '')
             
-            # Replace UoM column with 格式转换
+            df_export_enhanced['格式转换'] = df_export_enhanced['UUID'].apply(get_format_conversion)
+            df_export_enhanced['PW#'] = df_export_enhanced['UUID'].apply(get_pw_number)
+            
+            # Replace UoM column (L) with 格式转换
             uom_col_idx = df_export_enhanced.columns.get_loc('UoM')
             df_export_enhanced.insert(uom_col_idx, '格式转换_temp', df_export_enhanced['格式转换'])
             df_export_enhanced = df_export_enhanced.drop(columns=['UoM', '格式转换'])
             df_export_enhanced = df_export_enhanced.rename(columns={'格式转换_temp': '格式转换'})
             
+            # Replace Conf. Qty column (K) with PW#
+            conf_qty_col_idx = df_export_enhanced.columns.get_loc('Conf. Qty')
+            df_export_enhanced.insert(conf_qty_col_idx, 'PW#_temp', df_export_enhanced['PW#'])
+            df_export_enhanced = df_export_enhanced.drop(columns=['Conf. Qty', 'PW#'])
+            df_export_enhanced = df_export_enhanced.rename(columns={'PW#_temp': 'PW#'})
+            
             # Remove helper columns for clean output (keep same as original export)
             cols_to_remove = ['Product_Base', 'Brand', 'PN', 'UUID', 'Is_New']
             df_export_enhanced = df_export_enhanced.drop(columns=[c for c in cols_to_remove if c in df_export_enhanced.columns])
             
-            # Count how many 格式转换 were found
+            # Count how many were found
             format_found = (df_export_enhanced['格式转换'] != '').sum()
             format_missing = len(df_export_enhanced) - format_found
+            pw_found = (df_export_enhanced['PW#'] != '').sum()
+            pw_missing = len(df_export_enhanced) - pw_found
             
             # Complete!
             progress_bar.progress(100)
@@ -542,8 +568,60 @@ if export_file and history_file and master_file:
             st.session_state.df_new = df_new
             st.session_state.processing_complete = True
             
+            # Prepare all Excel buffers first
+            output_date = datetime.now().strftime('%Y%m%d')
+            
+            # Factory buffer
+            factory_buffer = io.BytesIO()
+            with pd.ExcelWriter(factory_buffer, engine='openpyxl') as writer:
+                factory_output.to_excel(writer, index=False, sheet_name='Sheet1')
+                worksheet = writer.sheets['Sheet1']
+                for row in range(2, len(factory_output) + 2):
+                    cell = worksheet.cell(row=row, column=1)
+                    cell.number_format = '0'
+            factory_buffer.seek(0)
+            
+            # OrderHub buffer
+            orderhub_buffer = io.BytesIO()
+            with pd.ExcelWriter(orderhub_buffer, engine='openpyxl') as writer:
+                orderhub_output.to_excel(writer, index=False, sheet_name='Sheet1')
+            orderhub_buffer.seek(0)
+            
+            # 格式转换 buffer
+            export_enhanced_buffer = io.BytesIO()
+            with pd.ExcelWriter(export_enhanced_buffer, engine='openpyxl') as writer:
+                df_export_enhanced.to_excel(writer, index=False, sheet_name='Sheet1')
+            export_enhanced_buffer.seek(0)
+            
+            # Create ZIP with all 3 files
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr(f"factory_output_{output_date}.xlsx", factory_buffer.getvalue())
+                zf.writestr(f"orderhub_output_{output_date}.xlsx", orderhub_buffer.getvalue())
+                zf.writestr(f"格式转换_{output_date}.xlsx", export_enhanced_buffer.getvalue())
+            zip_buffer.seek(0)
+            
+            # Reset buffers for individual downloads
+            factory_buffer.seek(0)
+            orderhub_buffer.seek(0)
+            export_enhanced_buffer.seek(0)
+            
             # Display results
             st.header("2️⃣ Download Your Files")
+            
+            # Download All button at the top
+            st.download_button(
+                label="📦 Download All (ZIP)",
+                data=zip_buffer,
+                file_name=f"signify_output_{output_date}.zip",
+                mime="application/zip",
+                use_container_width=True,
+                key="download_all_zip",
+                type="primary"
+            )
+            
+            st.markdown("---")
+            st.markdown("*Or download individually:*")
             
             col1, col2 = st.columns(2)
             
@@ -551,18 +629,6 @@ if export_file and history_file and master_file:
                 st.subheader("🏭 Factory Template")
                 st.dataframe(factory_output.head(3), use_container_width=True)
                 
-                # Convert to Excel with proper formatting for POAF
-                factory_buffer = io.BytesIO()
-                with pd.ExcelWriter(factory_buffer, engine='openpyxl') as writer:
-                    factory_output.to_excel(writer, index=False, sheet_name='Sheet1')
-                    # Format POAF column as number (no decimals)
-                    worksheet = writer.sheets['Sheet1']
-                    for row in range(2, len(factory_output) + 2):
-                        cell = worksheet.cell(row=row, column=1)  # POAF is column A
-                        cell.number_format = '0'  # Format as whole number
-                factory_buffer.seek(0)
-                
-                output_date = datetime.now().strftime('%Y%m%d')
                 st.download_button(
                     label="⬇️ Download Factory Template",
                     data=factory_buffer,
@@ -576,12 +642,6 @@ if export_file and history_file and master_file:
                 st.subheader("📋 OrderHub Template")
                 st.dataframe(orderhub_output.head(3), use_container_width=True)
                 
-                # Convert to Excel
-                orderhub_buffer = io.BytesIO()
-                with pd.ExcelWriter(orderhub_buffer, engine='openpyxl') as writer:
-                    orderhub_output.to_excel(writer, index=False, sheet_name='Sheet1')
-                orderhub_buffer.seek(0)
-                
                 st.download_button(
                     label="⬇️ Download OrderHub Template",
                     data=orderhub_buffer,
@@ -591,24 +651,18 @@ if export_file and history_file and master_file:
                     key="download_orderhub"
                 )
             
-            # NEW: 格式转换 File Download
+            # 格式转换 File Download
             st.subheader("📄 格式转换")
             
             col_a, col_b = st.columns([2, 1])
             with col_a:
                 st.markdown(f"""
-                Original export file with **Column L (UoM)** replaced by **格式转换**:
-                - **{format_found}** orders have 格式转换 filled
-                - **{format_missing}** orders are blank (need manual fill)
+                Original export with **PW#** (Col K) and **格式转换** (Col L) filled from history:
+                - **{pw_found}** orders have PW# filled | **{pw_missing}** blank
+                - **{format_found}** orders have 格式转换 filled | **{format_missing}** blank
                 """)
             
             with col_b:
-                # Convert to Excel
-                export_enhanced_buffer = io.BytesIO()
-                with pd.ExcelWriter(export_enhanced_buffer, engine='openpyxl') as writer:
-                    df_export_enhanced.to_excel(writer, index=False, sheet_name='Sheet1')
-                export_enhanced_buffer.seek(0)
-                
                 st.download_button(
                     label="⬇️ Download 格式转换",
                     data=export_enhanced_buffer,
@@ -792,4 +846,4 @@ else:
 
 # Footer
 st.markdown("---")
-st.markdown("Made by Joshua 😎 | v2.0 | January 2026")
+st.markdown("Made by Joshua 😎 | v2.1 | January 2026")

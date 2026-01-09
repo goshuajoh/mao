@@ -6,23 +6,24 @@ Deploy to Streamlit Cloud for free!
 
 Changes in v2.1:
 - Added PW# lookup (Column K) from order history
-- Added "Download All" ZIP button for all 3 files
+- Added "Download All" button that downloads 3 separate files (not ZIP)
 - 格式转换 file now includes both PW# and 格式转换
 
 Changes in v2.0:
 - POAF column formatted as whole number (no scientific notation)
-- OrderHub Tax Rate: 13 (not 0.13)
+- OrderHub Tax Rate: 13% (not 0.13)
 - OrderHub Solution: 'N/A'
 - Product suffix only for specific products (ESP32-SOLO-1, ESP32-C3-MINI-1, ESP-WROOM-02D)
 - New export file with 格式转换 filled from order history
 """
 
 import streamlit as st
+import streamlit.components.v1
 import pandas as pd
 import numpy as np
 from datetime import datetime
 import io
-import zipfile
+import base64
 
 def check_password():
     """Returns True if user enters correct password"""
@@ -593,13 +594,11 @@ if export_file and history_file and master_file:
                 df_export_enhanced.to_excel(writer, index=False, sheet_name='Sheet1')
             export_enhanced_buffer.seek(0)
             
-            # Create ZIP with all 3 files
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-                zf.writestr(f"factory_output_{output_date}.xlsx", factory_buffer.getvalue())
-                zf.writestr(f"orderhub_output_{output_date}.xlsx", orderhub_buffer.getvalue())
-                zf.writestr(f"格式转换_{output_date}.xlsx", export_enhanced_buffer.getvalue())
-            zip_buffer.seek(0)
+            # Store buffers in session state for multi-download
+            st.session_state.factory_b64 = base64.b64encode(factory_buffer.getvalue()).decode()
+            st.session_state.orderhub_b64 = base64.b64encode(orderhub_buffer.getvalue()).decode()
+            st.session_state.export_b64 = base64.b64encode(export_enhanced_buffer.getvalue()).decode()
+            st.session_state.output_date = output_date
             
             # Reset buffers for individual downloads
             factory_buffer.seek(0)
@@ -609,16 +608,51 @@ if export_file and history_file and master_file:
             # Display results
             st.header("2️⃣ Download Your Files")
             
-            # Download All button at the top
-            st.download_button(
-                label="📦 Download All (ZIP)",
-                data=zip_buffer,
-                file_name=f"signify_output_{output_date}.zip",
-                mime="application/zip",
-                use_container_width=True,
-                key="download_all_zip",
-                type="primary"
-            )
+            # JavaScript-based Download All button
+            download_all_js = f"""
+            <script>
+            function downloadFile(base64Data, filename) {{
+                const link = document.createElement('a');
+                link.href = 'data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,' + base64Data;
+                link.download = filename;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            }}
+            
+            function downloadAll() {{
+                const factory_b64 = "{st.session_state.factory_b64}";
+                const orderhub_b64 = "{st.session_state.orderhub_b64}";
+                const export_b64 = "{st.session_state.export_b64}";
+                const date = "{output_date}";
+                
+                // Download with slight delays to prevent browser blocking
+                downloadFile(factory_b64, 'factory_output_' + date + '.xlsx');
+                setTimeout(function() {{
+                    downloadFile(orderhub_b64, 'orderhub_output_' + date + '.xlsx');
+                }}, 500);
+                setTimeout(function() {{
+                    downloadFile(export_b64, '格式转换_' + date + '.xlsx');
+                }}, 1000);
+            }}
+            </script>
+            <button onclick="downloadAll()" style="
+                background-color: #FF4B4B;
+                color: white;
+                padding: 0.75rem 1.5rem;
+                font-size: 16px;
+                font-weight: 600;
+                border: none;
+                border-radius: 8px;
+                cursor: pointer;
+                width: 100%;
+                margin-bottom: 1rem;
+            ">
+                📦 Download All (3 Files)
+            </button>
+            """
+            
+            st.components.v1.html(download_all_js, height=60)
             
             st.markdown("---")
             st.markdown("*Or download individually:*")

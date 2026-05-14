@@ -1,8 +1,15 @@
 """
-Signify Order Processor - Web App v2.1
+Signify Order Processor - Web App v2.2
 =======================================
 Streamlit web interface for non-technical users
 Deploy to Streamlit Cloud for free!
+
+Changes in v2.2:
+- FIX: Firmware lookup now also checks column headers in master sheet
+  (the absorbed first data row was being ignored, e.g. PN 123093 was missed)
+- FIX: Removed history fallback for firmware - returns blank if not in master.
+  The history fallback was returning wrong (old) firmware versions like V1.24.2
+  from 2022 orders. Blank is safer - lets user know they need to update master.
 
 Changes in v2.1:
 - Added PW# lookup (Column K) from order history
@@ -280,38 +287,48 @@ if export_file and history_file and master_file:
             status_text.text("Step 7/12: Looking up firmware versions...")
             progress_bar.progress(56)
             
-            def lookup_non_matter_firmware(pn_clean, product_base):
-                """
-                Search for PN as a value within any column (not as column header).
-                When found, return the firmware from column 4 of that row.
-                """
-                pn_str = str(pn_clean)
-                
-                for col_idx in range(5, len(df_non_matter.columns)):
-                    col = df_non_matter.columns[col_idx]
-                    for idx, value in df_non_matter[col].items():
-                        if pd.notna(value):
-                            if str(value) == pn_str or (isinstance(value, (int, float)) and str(int(value)) == pn_str):
-                                firmware = df_non_matter.iloc[idx, 4]
-                                if pd.notna(firmware) and str(firmware).startswith('V'):
-                                    return firmware
-                return None
+            # ==============================================================
+            # FIXED LOOKUP (v2.2):
+            # 1. Also checks column HEADERS (the first data row that pandas
+            #    absorbed as headers). When master sheet's first row contains
+            #    a PN in cols 5+, that PN is in the HEADER not in cell data.
+            #    The corresponding firmware is df.columns[4].
+            # 2. Removed history fallback - returns None if not in master.
+            #    History fallback was returning stale firmware (e.g. V1.24.2
+            #    from 2022 orders) via mode() which biases to oldest version.
+            # ==============================================================
             
-            def lookup_matter_firmware(pn_clean, product_base):
+            def lookup_in_sheet(pn_clean, df_sheet):
                 """
-                Search for PN as a value within any column (not as column header).
-                When found, return the firmware from column 4 of that row.
+                Generic lookup: search both column headers and cell values.
+                Returns firmware string starting with 'V', or None.
                 """
                 try:
                     pn_numeric = int(float(pn_clean))
-                except:
+                except (ValueError, TypeError):
                     pn_numeric = None
-                
                 pn_str = str(pn_clean)
                 
-                for col_idx in range(5, len(df_matter.columns)):
-                    col = df_matter.columns[col_idx]
-                    for idx, value in df_matter[col].items():
+                # --- Step A: Check column HEADERS (absorbed first data row) ---
+                header_fw = df_sheet.columns[4]
+                if pd.notna(header_fw) and str(header_fw).startswith('V'):
+                    for col_idx in range(5, len(df_sheet.columns)):
+                        col = df_sheet.columns[col_idx]
+                        # Numeric match
+                        if pn_numeric is not None and isinstance(col, (int, float)):
+                            try:
+                                if int(col) == pn_numeric:
+                                    return header_fw
+                            except (ValueError, TypeError):
+                                pass
+                        # String match
+                        if str(col).strip() == pn_str:
+                            return header_fw
+                
+                # --- Step B: Check cell values (original logic) ---
+                for col_idx in range(5, len(df_sheet.columns)):
+                    col = df_sheet.columns[col_idx]
+                    for idx, value in df_sheet[col].items():
                         if pd.notna(value):
                             match = False
                             if isinstance(value, (int, float)):
@@ -321,41 +338,36 @@ if export_file and history_file and master_file:
                                 match = True
                             
                             if match:
-                                firmware = df_matter.iloc[idx, 4]
+                                firmware = df_sheet.iloc[idx, 4]
                                 if pd.notna(firmware) and str(firmware).startswith('V'):
                                     return firmware
                 return None
             
-            def lookup_firmware_from_history(pn_clean):
-                """Fallback: Look up firmware from order history for this PN"""
-                matches = df_history[
-                    df_history[df_history.columns[5]].astype(str).str.contains(str(pn_clean), case=False, na=False)
-                ]
-                if len(matches) > 0:
-                    fw_values = matches[matches.columns[6]].dropna()
-                    valid_fw = fw_values[fw_values.astype(str).str.startswith('V')]
-                    if len(valid_fw) > 0:
-                        return valid_fw.mode()[0] if len(valid_fw.mode()) > 0 else valid_fw.iloc[-1]
-                return None
+            def lookup_non_matter_firmware(pn_clean, product_base):
+                return lookup_in_sheet(pn_clean, df_non_matter)
+            
+            def lookup_matter_firmware(pn_clean, product_base):
+                return lookup_in_sheet(pn_clean, df_matter)
+            
+            # NOTE: history fallback removed in v2.2 - was returning stale firmware
             
             df_new['Firmware'] = None
             for idx, row in df_new.iterrows():
-                fw = None
                 if row['Is_Matter']:
                     fw = lookup_matter_firmware(row['PN_Clean'], row['Product_Base'])
                 else:
                     fw = lookup_non_matter_firmware(row['PN_Clean'], row['Product_Base'])
-                
-                if fw is None:
-                    fw = lookup_firmware_from_history(row['PN_Clean'])
-                
+                # No history fallback - leave blank if not found in master
                 df_new.at[idx, 'Firmware'] = fw
             
             firmware_found = df_new['Firmware'].notna().sum()
             firmware_missing = df_new['Firmware'].isna().sum()
             
             if firmware_missing > 0:
-                st.warning(f"⚠️ {firmware_missing} orders missing firmware (will be empty in output)")
+                missing_pns = df_new[df_new['Firmware'].isna()][['PN', 'Product_Base', 'Is_Matter']].drop_duplicates()
+                st.warning(f"⚠️ {firmware_missing} orders missing firmware in master sheet (left blank):")
+                st.dataframe(missing_pns, use_container_width=True)
+                st.info("💡 Update your master reference file to include these PNs.")
             
             # Step 8: Add product suffixes (UPDATED LOGIC)
             status_text.text("Step 8/12: Normalizing product names...")
@@ -880,4 +892,4 @@ else:
 
 # Footer
 st.markdown("---")
-st.markdown("Made by Joshua 😎 | v2.1 | January 2026")
+st.markdown("Made by Joshua 😎 | v2.2 | May 2026")
